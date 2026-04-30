@@ -1,0 +1,489 @@
+import React, { useState, useRef } from 'react';
+import { Upload, Image as ImageIcon, Video, Copy, Check, ArrowRight, ArrowLeft, Loader2, Sparkles, AlertCircle } from 'lucide-react';
+
+const CATEGORIES = ["Pakaian", "Jilbab", "Sepatu", "Makanan", "Skincare/Kosmetik", "Elektronik", "Tas", "Lainnya"];
+const BACKGROUNDS = ["Studio Foto Polos", "Kamar Tidur Aesthetic", "Kafe Cozy", "Jalanan Perkotaan (Street)", "Taman / Alam Terbuka"];
+const VIBES = ["Cinematic & Dramatis", "Edgy & Bold", "Fun & Cheerful", "Minimalist & Clean", "Soft & Pastel", "Professional/Corporate"];
+
+export default function App() {
+  // State Step 1: Input Awal
+  const [step, setStep] = useState(1);
+  const [imageFile, setImageFile] = useState(null);
+  const [imageBase64, setImageBase64] = useState("");
+  const [category, setCategory] = useState(CATEGORIES[0]);
+  const [customCategory, setCustomCategory] = useState("");
+  const [productDesc, setProductDesc] = useState("");
+  
+  // State Step 2: Klarifikasi
+  const [background, setBackground] = useState("");
+  const [customBg, setCustomBg] = useState("");
+  const [vibe, setVibe] = useState("");
+  const [customVibe, setCustomVibe] = useState("");
+
+  // State Processing & Output
+  const [isLoading, setIsLoading] = useState(false);
+  const [results, setResults] = useState(null);
+  const [error, setError] = useState("");
+  const [copiedIndex, setCopiedIndex] = useState({ type: null, index: null });
+
+  const fileInputRef = useRef(null);
+
+  // Helper File Upload
+  const handleFileChange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      if (file.size > 5 * 1024 * 1024) {
+        setError("Ukuran gambar terlalu besar. Maksimal 5MB.");
+        return;
+      }
+      setImageFile(file);
+      setError("");
+      
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        // Hapus prefix data:image/...;base64, untuk Gemini API
+        const base64String = reader.result.split(',')[1];
+        setImageBase64(base64String);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleNext = () => {
+    if (!productDesc.trim()) {
+      setError("Mohon deskripsikan produk afiliasi Anda terlebih dahulu.");
+      return;
+    }
+    setError("");
+    setStep(2);
+  };
+
+  // API Call ke Gemini
+  const handleGenerate = async () => {
+    const selectedBg = background === "Lainnya" ? customBg : background;
+    const selectedVibe = vibe === "Lainnya" ? customVibe : vibe;
+
+    if (!selectedBg || !selectedVibe) {
+      setError("Mohon lengkapi latar belakang dan suasana (vibe).");
+      return;
+    }
+
+    setIsLoading(true);
+    setError("");
+    
+    const apiKey = ""; // API key disediakan secara internal pada environment ini
+
+    const actualCategory = category === "Lainnya" ? customCategory : category;
+
+    const systemPrompt = `
+      Kamu adalah Asisten Prompt Engineer Ahli untuk kreator konten afiliasi. 
+      Tugasmu adalah menghasilkan 5 ide pose produk yang adaptif, spesifik, dan memukau berdasarkan input pengguna.
+      Aturan Kamera & Pose (SANGAT PENTING): 
+      - Jika produk "Sepatu", pastikan ada opsi pose yang fokus pada kaki, sepatu, melangkah, atau low angle.
+      - Jika produk "Jilbab" atau "Pakaian", fokus pada detail kain, tekstur, gaya pemakaian (OOTD), atau medium shot/close-up.
+      - Jika produk "Makanan", pose harus fokus pada interaksi dengan makanan (memegang, memakan, flatlay estetis).
+      - Jika ada referensi wajah karakter yang diunggah, masukkan arahan ke prompt gambar untuk menggunakan/mempertahankan wajah karakter utama.
+    `;
+
+    const userPrompt = `
+      Saya butuh 5 ide pose untuk produk afiliasi saya.
+      Kategori Produk: ${actualCategory}
+      Detail Produk: ${productDesc}
+      Latar (Setting): ${selectedBg}
+      Suasana (Vibe): ${selectedVibe}
+      ${imageBase64 ? "Saya telah melampirkan foto wajah karakter sebagai referensi gaya/wajah." : "Tidak ada referensi wajah khusus."}
+    `;
+
+    const requestPayload = {
+      contents: [
+        {
+          parts: [
+            { text: userPrompt },
+            ...(imageBase64 ? [{ inlineData: { mimeType: "image/jpeg", data: imageBase64 } }] : [])
+          ]
+        }
+      ],
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: "OBJECT",
+          properties: {
+            poses: {
+              type: "ARRAY",
+              items: {
+                type: "OBJECT",
+                properties: {
+                  poseName: { type: "STRING", description: "Nama singkat dan menarik untuk pose ini" },
+                  poseDescription: { type: "STRING", description: "Deskripsi pose mengapa ini cocok untuk produk" },
+                  imagePrompt: { type: "STRING", description: "Prompt lengkap dan detail (dalam bahasa Inggris) untuk Midjourney/DALL-E. Sertakan lighting, angle, detail produk, latar." },
+                  videoPrompt: { type: "STRING", description: "Prompt singkat dan dinamis (dalam bahasa Inggris) untuk Meta AI Video. Fokus pada aksi pendek, tanpa perlu referensi tambahan." }
+                },
+                required: ["poseName", "poseDescription", "imagePrompt", "videoPrompt"]
+              }
+            }
+          },
+          required: ["poses"]
+        }
+      }
+    };
+
+    try {
+      // Retry mechanism (Exponential Backoff)
+      let response;
+      let retries = 5;
+      let delay = 1000;
+      
+      while (retries > 0) {
+        response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(requestPayload)
+        });
+
+        if (response.ok) break;
+        retries--;
+        await new Promise(res => setTimeout(res, delay));
+        delay *= 2;
+      }
+
+      if (!response.ok) throw new Error("Gagal terhubung ke AI. Coba lagi nanti.");
+
+      const data = await response.json();
+      const textResponse = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      
+      if (!textResponse) throw new Error("Respons AI kosong.");
+      
+      const parsedData = JSON.parse(textResponse);
+      setResults(parsedData.poses);
+      setStep(3);
+    } catch (err) {
+      console.error(err);
+      setError(err.message || "Terjadi kesalahan saat memproses data.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const copyToClipboard = (text, type, index) => {
+    // Gunakan execCommand sebagai fallback aman untuk iframe
+    const textArea = document.createElement("textarea");
+    textArea.value = text;
+    document.body.appendChild(textArea);
+    textArea.select();
+    try {
+      document.execCommand('copy');
+      setCopiedIndex({ type, index });
+      setTimeout(() => setCopiedIndex({ type: null, index: null }), 2000);
+    } catch (err) {
+      console.error('Failed to copy', err);
+    }
+    document.body.removeChild(textArea);
+  };
+
+  const resetFlow = () => {
+    setStep(1);
+    setResults(null);
+    setImageFile(null);
+    setImageBase64("");
+    setProductDesc("");
+    setBackground("");
+    setCustomBg("");
+    setVibe("");
+    setCustomVibe("");
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans p-4 sm:p-8">
+      <div className="max-w-4xl mx-auto space-y-6">
+        
+        {/* Header */}
+        <header className="text-center space-y-2 mb-8">
+          <div className="inline-flex items-center justify-center p-3 bg-blue-600 rounded-full mb-2">
+            <Sparkles className="w-6 h-6 text-white" />
+          </div>
+          <h1 className="text-3xl font-bold tracking-tight text-slate-900">Affiliate Prompt Generator</h1>
+          <p className="text-slate-500 max-w-xl mx-auto">
+            Hasilkan ide pose, prompt gambar, dan prompt video Meta AI yang dikhususkan untuk menonjolkan produk afiliasi Anda secara otomatis.
+          </p>
+        </header>
+
+        {/* Error Alert */}
+        {error && (
+          <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-r-md flex items-start">
+            <AlertCircle className="w-5 h-5 text-red-500 mr-2 flex-shrink-0 mt-0.5" />
+            <p className="text-red-700 text-sm">{error}</p>
+          </div>
+        )}
+
+        {/* Main Content Area */}
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden transition-all">
+          
+          {/* STEP 1: INPUT DASAR */}
+          {step === 1 && (
+            <div className="p-6 sm:p-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+              <h2 className="text-xl font-semibold mb-6 flex items-center">
+                <span className="bg-blue-100 text-blue-700 w-8 h-8 rounded-full flex items-center justify-center mr-3 text-sm">1</span>
+                Informasi Produk & Referensi
+              </h2>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                {/* Kolom Kiri: Upload Wajah */}
+                <div className="space-y-4">
+                  <label className="block text-sm font-medium text-slate-700">Referensi Wajah Karakter (Opsional)</label>
+                  <div 
+                    onClick={() => fileInputRef.current?.click()}
+                    className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-colors
+                      ${imageFile ? 'border-blue-500 bg-blue-50' : 'border-slate-300 hover:border-blue-400 hover:bg-slate-50'}`}
+                  >
+                    <input 
+                      type="file" 
+                      ref={fileInputRef} 
+                      className="hidden" 
+                      accept="image/*" 
+                      onChange={handleFileChange}
+                    />
+                    {imageFile ? (
+                      <div className="space-y-2">
+                        <div className="w-16 h-16 mx-auto rounded-full bg-blue-100 overflow-hidden border-2 border-white shadow-sm">
+                          <img src={URL.createObjectURL(imageFile)} alt="Preview" className="w-full h-full object-cover" />
+                        </div>
+                        <p className="text-sm font-medium text-blue-700">{imageFile.name}</p>
+                        <p className="text-xs text-blue-500">Klik untuk mengganti foto</p>
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        <Upload className="w-8 h-8 mx-auto text-slate-400" />
+                        <p className="text-sm text-slate-600">Klik untuk memilih file foto</p>
+                        <p className="text-xs text-slate-400">JPG, PNG (Maks 5MB)</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Kolom Kanan: Detail Produk */}
+                <div className="space-y-5">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-2">Kategori Produk</label>
+                    <select 
+                      value={category} 
+                      onChange={(e) => setCategory(e.target.value)}
+                      className="w-full p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                    >
+                      {CATEGORIES.map(cat => (
+                        <option key={cat} value={cat}>{cat}</option>
+                      ))}
+                    </select>
+                    {category === "Lainnya" && (
+                      <input 
+                        type="text" 
+                        placeholder="Sebutkan kategorinya..." 
+                        value={customCategory}
+                        onChange={(e) => setCustomCategory(e.target.value)}
+                        className="mt-2 w-full p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                      />
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-2">Detail & Ciri Produk</label>
+                    <textarea 
+                      rows="4"
+                      placeholder="Contoh: Sepatu sneakers putih tebal dengan aksen garis merah muda, gaya sporty casual..."
+                      value={productDesc}
+                      onChange={(e) => setProductDesc(e.target.value)}
+                      className="w-full p-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none resize-none"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-8 flex justify-end">
+                <button 
+                  onClick={handleNext}
+                  className="bg-slate-900 hover:bg-slate-800 text-white px-6 py-2.5 rounded-lg font-medium flex items-center transition-colors"
+                >
+                  Lanjut ke Detail Visual <ArrowRight className="w-4 h-4 ml-2" />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* STEP 2: KLARIFIKASI SETTING & VIBE */}
+          {step === 2 && (
+            <div className="p-6 sm:p-8 animate-in fade-in slide-in-from-right-8 duration-500">
+               <h2 className="text-xl font-semibold mb-6 flex items-center">
+                <span className="bg-blue-100 text-blue-700 w-8 h-8 rounded-full flex items-center justify-center mr-3 text-sm">2</span>
+                Klarifikasi Visual (Latar & Suasana)
+              </h2>
+
+              <div className="space-y-8">
+                {/* Background Selection */}
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-3">Di mana latar belakang (setting) posenya?</label>
+                  <div className="flex flex-wrap gap-2">
+                    {BACKGROUNDS.map(bg => (
+                      <button
+                        key={bg}
+                        onClick={() => setBackground(bg)}
+                        className={`px-4 py-2 rounded-full text-sm border transition-colors ${
+                          background === bg ? 'bg-blue-600 border-blue-600 text-white' : 'bg-white border-slate-300 text-slate-700 hover:border-blue-400 hover:bg-blue-50'
+                        }`}
+                      >
+                        {bg}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => setBackground("Lainnya")}
+                      className={`px-4 py-2 rounded-full text-sm border transition-colors ${
+                        background === "Lainnya" ? 'bg-blue-600 border-blue-600 text-white' : 'bg-white border-slate-300 text-slate-700 hover:border-blue-400 hover:bg-blue-50'
+                      }`}
+                    >
+                      Lainnya...
+                    </button>
+                  </div>
+                  {background === "Lainnya" && (
+                    <input 
+                      type="text" 
+                      placeholder="Masukkan latar kustom Anda (misal: Pantai tropis, Perpustakaan tua)..." 
+                      value={customBg}
+                      onChange={(e) => setCustomBg(e.target.value)}
+                      className="mt-3 w-full p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none"
+                    />
+                  )}
+                </div>
+
+                {/* Vibe Selection */}
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-3">Bagaimana suasana (vibe) gambar/videonya?</label>
+                  <div className="flex flex-wrap gap-2">
+                    {VIBES.map(v => (
+                      <button
+                        key={v}
+                        onClick={() => setVibe(v)}
+                        className={`px-4 py-2 rounded-full text-sm border transition-colors ${
+                          vibe === v ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-white border-slate-300 text-slate-700 hover:border-indigo-400 hover:bg-indigo-50'
+                        }`}
+                      >
+                        {v}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => setVibe("Lainnya")}
+                      className={`px-4 py-2 rounded-full text-sm border transition-colors ${
+                        vibe === "Lainnya" ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-white border-slate-300 text-slate-700 hover:border-indigo-400 hover:bg-indigo-50'
+                      }`}
+                    >
+                      Lainnya...
+                    </button>
+                  </div>
+                  {vibe === "Lainnya" && (
+                    <input 
+                      type="text" 
+                      placeholder="Masukkan suasana kustom (misal: Cyberpunk neon, Horror gelap)..." 
+                      value={customVibe}
+                      onChange={(e) => setCustomVibe(e.target.value)}
+                      className="mt-3 w-full p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-indigo-500 outline-none"
+                    />
+                  )}
+                </div>
+              </div>
+
+              <div className="mt-10 flex justify-between items-center">
+                <button 
+                  onClick={() => setStep(1)}
+                  className="text-slate-500 hover:text-slate-800 font-medium flex items-center"
+                  disabled={isLoading}
+                >
+                  <ArrowLeft className="w-4 h-4 mr-2" /> Kembali
+                </button>
+                <button 
+                  onClick={handleGenerate}
+                  disabled={isLoading}
+                  className="bg-slate-900 hover:bg-slate-800 disabled:bg-slate-400 text-white px-6 py-2.5 rounded-lg font-medium flex items-center transition-colors"
+                >
+                  {isLoading ? (
+                    <><Loader2 className="w-5 h-5 mr-2 animate-spin" /> Menganalisis...</>
+                  ) : (
+                    <><Sparkles className="w-4 h-4 mr-2" /> Buat 5 Pose Prompt</>
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* STEP 3: HASIL OUTPUT */}
+          {step === 3 && results && (
+            <div className="p-6 sm:p-8 bg-slate-50 animate-in fade-in zoom-in-95 duration-500">
+               <div className="flex justify-between items-center mb-6">
+                 <div>
+                    <h2 className="text-2xl font-bold text-slate-900">Hasil Generator Pose</h2>
+                    <p className="text-sm text-slate-500">5 Opsi adaptif untuk menonjolkan produk {category}</p>
+                 </div>
+                 <button 
+                    onClick={resetFlow}
+                    className="text-sm font-medium text-blue-600 hover:text-blue-800 flex items-center bg-blue-50 px-3 py-1.5 rounded-md"
+                  >
+                    Buat Baru
+                  </button>
+               </div>
+
+               <div className="space-y-8">
+                 {results.map((pose, index) => (
+                   <div key={index} className="bg-white p-5 rounded-xl shadow-sm border border-slate-200">
+                     <div className="mb-4">
+                        <div className="flex items-center space-x-2">
+                          <span className="bg-indigo-100 text-indigo-700 text-xs font-bold px-2 py-1 rounded">Pose {index + 1}</span>
+                          <h3 className="text-lg font-bold text-slate-800">{pose.poseName}</h3>
+                        </div>
+                        <p className="text-sm text-slate-600 mt-1">{pose.poseDescription}</p>
+                     </div>
+
+                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {/* Image Prompt Box */}
+                        <div className="border border-blue-100 bg-blue-50/30 rounded-lg p-4 relative group">
+                          <div className="flex items-center text-blue-700 font-semibold text-sm mb-2">
+                            <ImageIcon className="w-4 h-4 mr-1.5" />
+                            Prompt Gambar (Midjourney/DALL-E)
+                          </div>
+                          <p className="text-sm text-slate-700 pr-8">{pose.imagePrompt}</p>
+                          <button 
+                            onClick={() => copyToClipboard(pose.imagePrompt, 'image', index)}
+                            className="absolute top-4 right-4 p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-100 rounded transition-colors"
+                            title="Copy text"
+                          >
+                            {copiedIndex.type === 'image' && copiedIndex.index === index ? 
+                              <Check className="w-4 h-4 text-green-600" /> : <Copy className="w-4 h-4" />
+                            }
+                          </button>
+                        </div>
+
+                        {/* Video Prompt Box */}
+                        <div className="border border-purple-100 bg-purple-50/30 rounded-lg p-4 relative group">
+                          <div className="flex items-center text-purple-700 font-semibold text-sm mb-2">
+                            <Video className="w-4 h-4 mr-1.5" />
+                            Prompt Video (Meta AI)
+                          </div>
+                          <p className="text-sm text-slate-700 pr-8">{pose.videoPrompt}</p>
+                          <button 
+                            onClick={() => copyToClipboard(pose.videoPrompt, 'video', index)}
+                            className="absolute top-4 right-4 p-1.5 text-slate-400 hover:text-purple-600 hover:bg-purple-100 rounded transition-colors"
+                            title="Copy text"
+                          >
+                            {copiedIndex.type === 'video' && copiedIndex.index === index ? 
+                              <Check className="w-4 h-4 text-green-600" /> : <Copy className="w-4 h-4" />
+                            }
+                          </button>
+                        </div>
+                     </div>
+                   </div>
+                 ))}
+               </div>
+            </div>
+          )}
+
+        </div>
+      </div>
+    </div>
+  );
+}
